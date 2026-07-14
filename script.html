@@ -1,0 +1,869 @@
+<script>
+  /**
+   * Thai AirAsia Crew Random Inspection Web App - Frontend Logic
+   * Developed by Antigravity (Google DeepMind Team)
+   * 
+   * Manages Offline-first LocalStorage records, auto-saving drafts,
+   * progress tracking, and batch synchronization with GAS server.
+   */
+
+  // Global State Variable
+  const AppState = {
+    checklist: [],
+    profile: { email: '', name: '', isAuthorized: false },
+    localAudits: [],
+    activeTab: 'form',
+    isOnline: navigator.onLine
+  };
+
+  // Local Storage Keys
+  const CACHE_KEYS = {
+    PROFILE: 'taa_crew_profile',
+    CHECKLIST: 'taa_crew_checklist',
+    RECORDS: 'taa_crew_audits',
+    DRAFT: 'taa_crew_active_draft'
+  };
+
+  // --- 1. INITIALIZATION ---
+
+  window.addEventListener('DOMContentLoaded', () => {
+    initializeNetworkStatus();
+    initializeDefaultDate();
+    loadLocalAudits();
+    bootApp();
+  });
+
+  /**
+   * Sets up real-time network connection monitoring.
+   */
+  function initializeNetworkStatus() {
+    AppState.isOnline = navigator.onLine;
+    updateNetworkBadge(AppState.isOnline);
+
+    window.addEventListener('online', () => {
+      AppState.isOnline = true;
+      updateNetworkBadge(true);
+      showToast('📶 Internet Reconnected', 'You are back online. Auto-syncing pending reports...', 'toast-success');
+      triggerAutoSync();
+    });
+
+    window.addEventListener('offline', () => {
+      AppState.isOnline = false;
+      updateNetworkBadge(false);
+      showToast('✈️ Offline Mode Activated', 'Offline mode active. All audits will be stored securely on device.', 'toast-warning');
+    });
+  }
+
+  /**
+   * Update header connection badge.
+   */
+  function updateNetworkBadge(isOnline) {
+    const badge = document.getElementById('network-badge');
+    const label = badge.querySelector('.badge-label');
+    
+    if (isOnline) {
+      badge.className = 'network-badge online';
+      label.textContent = 'Online';
+    } else {
+      badge.className = 'network-badge offline';
+      label.textContent = 'Offline';
+    }
+  }
+
+  /**
+   * Set observation date input to local today date.
+   */
+  function initializeDefaultDate() {
+    const dateInput = document.getElementById('obs-date');
+    if (dateInput) {
+      const today = new Date();
+      // Adjust timezone offset to get local YYYY-MM-DD
+      const offset = today.getTimezoneOffset();
+      const localToday = new Date(today.getTime() - (offset * 60 * 1000));
+      dateInput.value = localToday.toISOString().split('T')[0];
+    }
+  }
+
+  /**
+   * Loads inspections from LocalStorage into memory state.
+   */
+  function loadLocalAudits() {
+    try {
+      const stored = localStorage.getItem(CACHE_KEYS.RECORDS);
+      AppState.localAudits = stored ? JSON.parse(stored) : [];
+    } catch (e) {
+      console.error('Error reading localStorage audits:', e);
+      AppState.localAudits = [];
+    }
+  }
+
+  /**
+   * Boots up the App - handles Online Server boot or Offline cached restore.
+   */
+  function bootApp() {
+    const loader = document.getElementById('app-loader');
+
+    if (AppState.isOnline) {
+      // ONLINE INITIALIZATION
+      console.log('Online. Initializing backend connection...');
+      google.script.run
+        .withSuccessHandler(onServerInitSuccess)
+        .withFailureHandler(onServerInitFailure)
+        .getAppInitializationData();
+    } else {
+      // OFFLINE INITIALIZATION
+      console.warn('Offline on boot. Attempting to restore cached session...');
+      const cachedProfile = localStorage.getItem(CACHE_KEYS.PROFILE);
+      const cachedChecklist = localStorage.getItem(CACHE_KEYS.CHECKLIST);
+
+      if (cachedProfile && cachedChecklist) {
+        AppState.profile = JSON.parse(cachedProfile);
+        AppState.checklist = JSON.parse(cachedChecklist);
+        
+        applyAuthorizedProfile(AppState.profile);
+        renderChecklist(AppState.checklist);
+        
+        loader.classList.add('hidden');
+        document.getElementById('app-layout').classList.remove('hidden');
+        
+        showToast('✈️ Offline Portal Ready', 'Inspection database loaded from local flight cache.', 'toast-warning');
+        updateDashboardMetrics();
+        checkActiveDraft();
+      } else {
+        // App never loaded before, and user is offline. Error state
+        loader.classList.add('hidden');
+        showNoCacheOfflineError();
+      }
+    }
+  }
+
+  /**
+   * Server returned initialization profile successfully.
+   */
+  function onServerInitSuccess(data) {
+    const loader = document.getElementById('app-loader');
+    
+    if (data.error) {
+      showToast('❌ Server Init Error', data.error, 'toast-danger');
+      onServerInitFailure(data.error);
+      return;
+    }
+    // Cache Checklist and profile for offline use
+    AppState.profile = {
+      email: data.userEmail,
+      name: data.userName,
+      isAuthorized: true
+    };
+    AppState.checklist = data.checklist;
+
+    localStorage.setItem(CACHE_KEYS.PROFILE, JSON.stringify(AppState.profile));
+    localStorage.setItem(CACHE_KEYS.CHECKLIST, JSON.stringify(AppState.checklist));
+
+    applyAuthorizedProfile(AppState.profile);
+    renderChecklist(AppState.checklist);
+
+    loader.classList.add('hidden');
+    document.getElementById('app-layout').classList.remove('hidden');
+
+    showToast('🏆 Welcomed Aboard', `Logged in successfully as ${AppState.profile.name}.`, 'toast-success');
+    updateDashboardMetrics();
+    checkActiveDraft();
+
+    // Auto trigger sync if online and pending items exist
+    triggerAutoSync();
+  }
+
+  function onServerInitFailure(error) {
+    console.error('Server boot failed:', error);
+    
+    // Attempt fallback to local storage
+    const cachedProfile = localStorage.getItem(CACHE_KEYS.PROFILE);
+    const cachedChecklist = localStorage.getItem(CACHE_KEYS.CHECKLIST);
+
+    if (cachedProfile && cachedChecklist) {
+      AppState.profile = JSON.parse(cachedProfile);
+      AppState.checklist = JSON.parse(cachedChecklist);
+      
+      applyAuthorizedProfile(AppState.profile);
+      renderChecklist(AppState.checklist);
+      
+      document.getElementById('app-loader').classList.add('hidden');
+      document.getElementById('app-layout').classList.remove('hidden');
+      
+      showToast('⚠️ Sync Server Unreachable', 'Using offline cached session.', 'toast-warning');
+      updateDashboardMetrics();
+      checkActiveDraft();
+    } else {
+      document.getElementById('app-loader').classList.add('hidden');
+      showNoCacheOfflineError();
+    }
+  }
+
+  function showNoCacheOfflineError() {
+    const container = document.getElementById('toast-container');
+    container.innerHTML = `
+      <div class="toast toast-danger" style="transform: translateX(0); width: 100%; max-width: none;">
+        <span class="toast-icon">🚨</span>
+        <div class="toast-content">
+          <div class="toast-title">First-Time Load Required Online</div>
+          <div class="toast-msg">This webapp must be loaded once while connected to the internet to authorize your account and download checklist configurations. Please connect and refresh.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Inject authorized observer profile to UI elements.
+   */
+  function applyAuthorizedProfile(profile) {
+    document.getElementById('profile-name').textContent = profile.name;
+    document.getElementById('profile-email').textContent = profile.email;
+    document.getElementById('observer-name').value = profile.name;
+    
+    // Set avatar initials (e.g., Warut N. -> WN)
+    const parts = profile.name.split(' ');
+    let initials = 'OB';
+    if (parts.length > 0 && parts[0]) initials = parts[0][0];
+    if (parts.length > 1 && parts[1]) initials += parts[1][0];
+    document.getElementById('user-avatar-initials').textContent = initials.toUpperCase();
+  }
+
+  // --- 2. CHECKLIST RENDER ENGINE ---
+
+  /**
+   * Generates checklist question list inside HTML dynamically.
+   */
+  function renderChecklist(checklist) {
+    const container = document.getElementById('checklist-container');
+    if (!checklist || checklist.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">⚠️</div>
+          <h4>Checklist is empty</h4>
+          <p>Please configure checklist rows in sheet 'CheckList' Rows A7:A26.</p>
+        </div>
+      `;
+      return;
+    }
+
+    let html = '';
+    checklist.forEach(item => {
+      html += `
+        <div class="checklist-item" id="item-card-${item.id}">
+          <div class="item-header">
+            <div class="item-num">${item.id}</div>
+            <div class="item-question">${escapeHtml(item.question)}</div>
+          </div>
+          
+          <div class="item-actions">
+            <!-- Large tactile pill controls -->
+            <div class="pill-group">
+              <div class="pill-option">
+                <input type="radio" name="q_status_${item.id}" id="q_status_${item.id}_pass" value="Pass" class="pill-input" onchange="handleItemAnswer(${item.id}, 'Pass')">
+                <label for="q_status_${item.id}_pass" class="pill-label">Pass</label>
+              </div>
+              <div class="pill-option">
+                <input type="radio" name="q_status_${item.id}" id="q_status_${item.id}_fail" value="Fail" class="pill-input" onchange="handleItemAnswer(${item.id}, 'Fail')">
+                <label for="q_status_${item.id}_fail" class="pill-label">Fail</label>
+              </div>
+              <div class="pill-option">
+                <input type="radio" name="q_status_${item.id}" id="q_status_${item.id}_na" value="N/A" class="pill-input" onchange="handleItemAnswer(${item.id}, 'N/A')">
+                <label for="q_status_${item.id}_na" class="pill-label">N/A</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="item-comment-container">
+            <input type="text" id="q_comment_${item.id}" class="item-comment-input" 
+                   placeholder="Add specific comments/reasons (optional)..." 
+                   oninput="handleCommentInput(${item.id})">
+          </div>
+        </div>
+      `;
+    });
+
+    container.innerHTML = html;
+    updateChecklistProgressBar();
+
+    // Attach listeners to general input fields for auto-save draft
+    document.getElementById('obs-date').addEventListener('input', autoSaveDraft);
+    document.getElementById('flight-no').addEventListener('input', autoSaveDraft);
+    document.getElementById('destination').addEventListener('input', autoSaveDraft);
+    document.getElementById('overall-comments').addEventListener('input', autoSaveDraft);
+  }
+
+  /**
+   * Action handler when a checklist item is marked (Pass / Fail / N/A)
+   */
+  function handleItemAnswer(itemId, val) {
+    const card = document.getElementById(`item-card-${itemId}`);
+    
+    // Highlight Card states
+    if (val === 'Fail') {
+      card.classList.add('failed-state');
+      card.classList.add('answered');
+    } else {
+      card.classList.remove('failed-state');
+      card.classList.add('answered');
+    }
+
+    updateChecklistProgressBar();
+    autoSaveDraft();
+  }
+
+  function handleCommentInput(itemId) {
+    autoSaveDraft();
+  }
+
+  /**
+   * Calculates dynamic progress and renders progress percentage.
+   */
+  function updateChecklistProgressBar() {
+    const total = AppState.checklist.length;
+    if (total === 0) return;
+
+    let answered = 0;
+    AppState.checklist.forEach(item => {
+      const selected = document.querySelector(`input[name="q_status_${item.id}"]:checked`);
+      if (selected) answered++;
+    });
+
+    const percentage = Math.round((answered / total) * 100);
+    document.getElementById('checklist-progress').textContent = `Progress: ${percentage}% (${answered}/${total})`;
+  }
+
+  /**
+   * Quick action button to set entire checklist options.
+   */
+  function bulkSetChecklist(statusValue) {
+    AppState.checklist.forEach(item => {
+      const radio = document.getElementById(`q_status_${item.id}_${statusValue.toLowerCase().replace('/', '')}`);
+      if (radio) {
+        radio.checked = true;
+        handleItemAnswer(item.id, statusValue);
+      }
+    });
+    showToast('⚡ Quick filled', `All checklist items set to ${statusValue}`, 'toast-success');
+  }
+
+  // --- 3. LOCAL FORM DRAFTS (AUTO-SAVER) ---
+
+  /**
+   * Auto saves all progress in input fields into localStorage draft object.
+   */
+  function autoSaveDraft() {
+    const draft = {
+      date: document.getElementById('obs-date').value,
+      flightNo: document.getElementById('flight-no').value,
+      destination: document.getElementById('destination').value,
+      answers: [],
+      overallComments: document.getElementById('overall-comments').value
+    };
+
+    AppState.checklist.forEach(item => {
+      const selected = document.querySelector(`input[name="q_status_${item.id}"]:checked`);
+      const commentInput = document.getElementById(`q_comment_${item.id}`);
+      
+      draft.answers.push({
+        id: item.id,
+        status: selected ? selected.value : null,
+        comment: commentInput ? commentInput.value : ''
+      });
+    });
+
+    localStorage.setItem(CACHE_KEYS.DRAFT, JSON.stringify(draft));
+  }
+
+  /**
+   * Restores active draft into inputs if it exists.
+   */
+  function checkActiveDraft() {
+    const draftStr = localStorage.getItem(CACHE_KEYS.DRAFT);
+    if (!draftStr) return;
+
+    try {
+      const draft = JSON.parse(draftStr);
+      
+      // Only show banner if there is meaningful data in draft
+      if (!draft.flightNo && !draft.destination && draft.answers.every(a => !a.status)) {
+        return;
+      }
+
+      // Restore general info
+      if (draft.date) document.getElementById('obs-date').value = draft.date;
+      if (draft.flightNo) document.getElementById('flight-no').value = draft.flightNo;
+      if (draft.destination) document.getElementById('destination').value = draft.destination;
+      if (draft.overallComments) document.getElementById('overall-comments').value = draft.overallComments;
+
+      // Restore checklist radio options
+      draft.answers.forEach(ans => {
+        if (ans.status) {
+          const radio = document.getElementById(`q_status_${ans.id}_${ans.status.toLowerCase().replace('/', '')}`);
+          if (radio) {
+            radio.checked = true;
+            const card = document.getElementById(`item-card-${ans.id}`);
+            if (card) {
+              card.classList.add('answered');
+              if (ans.status === 'Fail') card.classList.add('failed-state');
+            }
+          }
+        }
+        if (ans.comment) {
+          const commentInput = document.getElementById(`q_comment_${ans.id}`);
+          if (commentInput) commentInput.value = ans.comment;
+        }
+      });
+
+      updateChecklistProgressBar();
+      
+      // Render draft banner warning
+      document.getElementById('draft-banner').classList.remove('hidden');
+
+    } catch (e) {
+      console.error('Error loading active draft:', e);
+    }
+  }
+
+  function clearDraftForm() {
+    localStorage.removeItem(CACHE_KEYS.DRAFT);
+    document.getElementById('draft-banner').classList.add('hidden');
+    
+    // Clear Form inputs
+    document.getElementById('flight-no').value = '';
+    document.getElementById('destination').value = '';
+    document.getElementById('overall-comments').value = '';
+    initializeDefaultDate();
+
+    // Clear radio checks and comments
+    AppState.checklist.forEach(item => {
+      const checkedRadio = document.querySelector(`input[name="q_status_${item.id}"]:checked`);
+      if (checkedRadio) checkedRadio.checked = false;
+      
+      const commentInput = document.getElementById(`q_comment_${item.id}`);
+      if (commentInput) commentInput.value = '';
+
+      const card = document.getElementById(`item-card-${item.id}`);
+      if (card) {
+        card.className = 'checklist-item';
+      }
+    });
+
+    updateChecklistProgressBar();
+    showToast('🗑️ Draft Discarded', 'Your active draft has been reset.', 'toast-warning');
+  }
+
+  function confirmResetForm() {
+    if (confirm('Are you sure you want to discard your progress and clear this entire form?')) {
+      clearDraftForm();
+    }
+  }
+
+  // --- 4. FORM SUBMISSION ---
+
+  /**
+   * Main submission processor. Captures audits and writes them offline locally.
+   */
+  function handleFormSubmit(event) {
+    event.preventDefault();
+
+    // 1. Verify and validate complete form
+    const unanswered = [];
+    AppState.checklist.forEach(item => {
+      const selected = document.querySelector(`input[name="q_status_${item.id}"]:checked`);
+      if (!selected) unanswered.push(item.id);
+    });
+
+    if (unanswered.length > 0) {
+      showToast('⚠️ Checklist Incomplete', `Please answer all checklist questions. Unanswered items: ${unanswered.join(', ')}`, 'toast-danger');
+      const firstUnansweredCard = document.getElementById(`item-card-${unanswered[0]}`);
+      if (firstUnansweredCard) {
+        firstUnansweredCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    // 2. Build local audit JSON entity
+    const flightNo = document.getElementById('flight-no').value.toUpperCase().trim();
+    const destination = document.getElementById('destination').value.toUpperCase().trim();
+    const obsDate = document.getElementById('obs-date').value;
+    const overallComments = document.getElementById('overall-comments').value;
+
+    const checklistAnswers = AppState.checklist.map(item => {
+      const selected = document.querySelector(`input[name="q_status_${item.id}"]:checked`);
+      const commentInput = document.getElementById(`q_comment_${item.id}`);
+      return {
+        id: item.id,
+        status: selected ? selected.value : 'N/A',
+        comment: commentInput ? commentInput.value : ''
+      };
+    });
+
+    const newAudit = {
+      id: 'audit_' + Date.now(),
+      timestamp: Date.now(),
+      observationDate: obsDate,
+      flightNo: flightNo,
+      destination: destination,
+      observerEmail: AppState.profile.email || 'offline_developer@airasia.com',
+      observerName: AppState.profile.name || 'Observer',
+      checklistAnswers: checklistAnswers,
+      overallComments: overallComments,
+      syncStatus: 'pending' // Defaults to offline queue
+    };
+
+    // 3. Save into local audit history array
+    AppState.localAudits.unshift(newAudit);
+    localStorage.setItem(CACHE_KEYS.RECORDS, JSON.stringify(AppState.localAudits));
+
+    // 4. Delete the active draft progress
+    localStorage.removeItem(CACHE_KEYS.DRAFT);
+    document.getElementById('draft-banner').classList.add('hidden');
+
+    // 5. Reset form page
+    document.getElementById('inspection-form').reset();
+    initializeDefaultDate();
+    AppState.checklist.forEach(item => {
+      const card = document.getElementById(`item-card-${item.id}`);
+      if (card) card.className = 'checklist-item';
+    });
+    updateChecklistProgressBar();
+
+    // 6. Alert User & Swap layout view
+    if (AppState.isOnline) {
+      showToast('🚀 Report Saved', `Inspection on ${flightNo} recorded. Initiating immediate server sync.`, 'toast-success');
+    } else {
+      showToast('✈️ Stored Offline', `Inspection on ${flightNo} saved to flight queue locally. Will sync back at airport.`, 'toast-warning');
+    }
+
+    updateDashboardMetrics();
+    switchTab('dashboard');
+
+    // 7. AutoSync triggering
+    triggerAutoSync();
+  }
+
+  // --- 5. SYNCHRONIZATION ENGINE (BI-DIRECTIONAL) ---
+
+  /**
+   * Scans local audits and synchronizes pending entities with Sheets API.
+   */
+  function triggerAutoSync() {
+    if (!AppState.isOnline) return;
+    
+    const pendingCount = AppState.localAudits.filter(a => a.syncStatus === 'pending').length;
+    if (pendingCount === 0) return;
+
+    console.log(`Auto-sync triggered. Found ${pendingCount} audits awaiting sync.`);
+    runSyncProcess();
+  }
+
+  function triggerManualSync() {
+    if (!AppState.isOnline) {
+      showToast('❌ Sync Blocked', 'Cannot sync while offline. Please connect to the internet first.', 'toast-danger');
+      return;
+    }
+    runSyncProcess();
+  }
+
+  /**
+   * Compiles pending arrays and posts to Google Apps Script Server.
+   */
+  function runSyncProcess() {
+    const pending = AppState.localAudits.filter(a => a.syncStatus === 'pending');
+    if (pending.length === 0) {
+      showToast('👌 Already Synced', 'All audits have been synced to Google Sheets.', 'toast-success');
+      return;
+    }
+
+    // Toggle Console visual card
+    const consoleCard = document.getElementById('sync-console-card');
+    consoleCard.classList.remove('hidden');
+    
+    const consoleLog = document.getElementById('sync-console-log');
+    consoleLog.innerHTML = `<div class="console-line info">[SYS] Starting synchronization process...</div>`;
+    addConsoleLine(`[SYS] Identified ${pending.length} pending report(s) in local queue.`, 'info');
+    addConsoleLine(`[SYS] Opening secure cloud sync pipeline to Google Spreadsheets...`, 'info');
+
+    // Highlight sync buttons
+    const manualBtn = document.getElementById('dashboard-sync-btn');
+    if (manualBtn) {
+      manualBtn.disabled = true;
+      manualBtn.textContent = '⏳ Syncing...';
+    }
+
+    google.script.run
+      .withSuccessHandler(onSyncSuccess)
+      .withFailureHandler(onSyncFailure)
+      .submitInspections(pending);
+  }
+
+  function onSyncSuccess(result) {
+    const manualBtn = document.getElementById('dashboard-sync-btn');
+    if (manualBtn) {
+      manualBtn.disabled = false;
+      manualBtn.textContent = '🔄 Sync Now';
+    }
+
+    if (result && result.success) {
+      addConsoleLine(`[SUCCESS] Google Sheets API written: ${result.count} rows appended successfully.`, 'success');
+      addConsoleLine(`[SYS] Finalizing storage optimization and database updates...`, 'info');
+
+      // Update state sync status
+      AppState.localAudits.forEach(local => {
+        if (local.syncStatus === 'pending') {
+          local.syncStatus = 'synced';
+        }
+      });
+
+      // Persist status
+      localStorage.setItem(CACHE_KEYS.RECORDS, JSON.stringify(AppState.localAudits));
+      
+      showToast('✅ Sync Completed', `Synchronized ${result.count} audit records with Google Sheet!`, 'toast-success');
+      
+      updateDashboardMetrics();
+      addConsoleLine(`[SYS] Synchronized! Storage queue is clean.`, 'success');
+
+      // Close console card after a brief delay
+      setTimeout(hideSyncConsole, 5000);
+    } else {
+      const err = (result && result.error) || 'Unknown server rejection';
+      addConsoleLine(`[ERROR] Server refused records: ${err}`, 'error');
+      showToast('❌ Sync Refused', `Database rejected payload: ${err}`, 'toast-danger');
+    }
+  }
+
+  function onSyncFailure(error) {
+    const manualBtn = document.getElementById('dashboard-sync-btn');
+    if (manualBtn) {
+      manualBtn.disabled = false;
+      manualBtn.textContent = '🔄 Sync Now';
+    }
+
+    const errStr = error ? error.toString() : 'Network communication error';
+    addConsoleLine(`[ERROR] Pipeline Broken: ${errStr}`, 'error');
+    addConsoleLine(`[SYS] Retaining records in LocalStorage buffer. Will retry shortly.`, 'info');
+    
+    showToast('❌ Sync Failed', 'Connection timeout. Audit logs remained stored safely in local memory.', 'toast-danger');
+  }
+
+  function addConsoleLine(text, type = '') {
+    const consoleLog = document.getElementById('sync-console-log');
+    if (consoleLog) {
+      const div = document.createElement('div');
+      div.className = `console-line ${type}`;
+      div.textContent = `${new Date().toLocaleTimeString()} - ${text}`;
+      consoleLog.appendChild(div);
+      consoleLog.scrollTop = consoleLog.scrollHeight;
+    }
+  }
+
+  function hideSyncConsole() {
+    document.getElementById('sync-console-card').classList.add('hidden');
+  }
+
+  // --- 6. DASHBOARD & HISTORY VIEW ---
+
+  /**
+   * Recalculates metrics and updates stats grids.
+   */
+  function updateDashboardMetrics() {
+    const total = AppState.localAudits.length;
+    const pending = AppState.localAudits.filter(a => a.syncStatus === 'pending').length;
+    
+    document.getElementById('stat-total-audits').textContent = total;
+    document.getElementById('stat-pending-sync').textContent = pending;
+
+    // Show/Hide Pending Card actions
+    const pendingCard = document.getElementById('stat-pending-card');
+    const syncBtn = document.getElementById('dashboard-sync-btn');
+    const tabBadge = document.getElementById('pending-count-badge');
+
+    if (pending > 0) {
+      pendingCard.classList.add('urgent-card');
+      if (syncBtn) syncBtn.classList.remove('hidden');
+      if (tabBadge) {
+        tabBadge.textContent = pending;
+        tabBadge.classList.remove('hidden');
+      }
+    } else {
+      pendingCard.classList.remove('urgent-card');
+      if (syncBtn) syncBtn.classList.add('hidden');
+      if (tabBadge) tabBadge.classList.add('hidden');
+    }
+
+    // Calculate pass rate of all checklist answers in our local history database
+    let totalQuestions = 0;
+    let passedQuestions = 0;
+
+    AppState.localAudits.forEach(audit => {
+      audit.checklistAnswers.forEach(ans => {
+        if (ans.status !== 'N/A') {
+          totalQuestions++;
+          if (ans.status === 'Pass') passedQuestions++;
+        }
+      });
+    });
+
+    const passRateText = totalQuestions > 0 ? Math.round((passedQuestions / totalQuestions) * 100) + '%' : '100%';
+    document.getElementById('stat-pass-rate').textContent = passRateText;
+
+    // Render historical logs
+    renderHistoryList(AppState.localAudits);
+  }
+
+  /**
+   * Renders the scrollable feed of previous inspection audits.
+   */
+  function renderHistoryList(records) {
+    const container = document.getElementById('history-container');
+    if (!records || records.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">📋</div>
+          <h4>No Audits Logged</h4>
+          <p>Recorded logs will compile here. Select 'Audit Form' to start an inspection.</p>
+        </div>
+      `;
+      return;
+    }
+
+    let html = '';
+    records.forEach(audit => {
+      // Calculate specific audit pass score
+      let totalQ = 0;
+      let passQ = 0;
+      audit.checklistAnswers.forEach(ans => {
+        if (ans.status !== 'N/A') {
+          totalQ++;
+          if (ans.status === 'Pass') passQ++;
+        }
+      });
+      const scorePercentage = totalQ > 0 ? Math.round((passQ / totalQ) * 100) : 100;
+      
+      const isSynced = audit.syncStatus === 'synced';
+      const statusClass = isSynced ? 'status-synced' : 'status-pending';
+      const statusIcon = isSynced ? '✅ Synced' : '✈️ Pending';
+
+      html += `
+        <div class="history-item">
+          <div class="history-meta">
+            <div class="history-title-row">
+              <span class="history-flight-badge">${escapeHtml(audit.flightNo)}</span>
+              <span class="history-dest-badge">➡️ ${escapeHtml(audit.destination)}</span>
+              <span class="history-date">📅 ${audit.observationDate}</span>
+            </div>
+            <div class="history-observer">
+              👤 Observer: ${escapeHtml(audit.observerName)} (${escapeHtml(audit.observerEmail)})
+            </div>
+            ${audit.overallComments ? `<div class="history-observer" style="font-style: italic; margin-top: 4px;">💬 "${escapeHtml(audit.overallComments)}"</div>` : ''}
+          </div>
+          
+          <div class="history-right-panel">
+            <span class="sync-status-indicator ${statusClass}">${statusIcon}</span>
+            <div class="history-score">${scorePercentage}% <span>Pass</span></div>
+          </div>
+        </div>
+      `;
+    });
+
+    container.innerHTML = html;
+  }
+
+  /**
+   * Realtime text searches and status filters.
+   */
+  function filterHistory() {
+    const query = document.getElementById('search-input').value.toUpperCase().trim();
+    const statusFilter = document.getElementById('status-filter').value;
+
+    const filtered = AppState.localAudits.filter(audit => {
+      const matchesSearch = audit.flightNo.toUpperCase().includes(query) || 
+                            audit.destination.toUpperCase().includes(query) ||
+                            audit.observerName.toUpperCase().includes(query);
+      
+      let matchesStatus = true;
+      if (statusFilter === 'pending') {
+        matchesStatus = audit.syncStatus === 'pending';
+      } else if (statusFilter === 'synced') {
+        matchesStatus = audit.syncStatus === 'synced';
+      }
+
+      return matchesSearch && matchesStatus;
+    });
+
+    renderHistoryList(filtered);
+  }
+
+  // --- 7. NAVIGATION CONTROLLER ---
+
+  /**
+   * Handle Tab Swapping
+   */
+  function switchTab(tabName) {
+    AppState.activeTab = tabName;
+    
+    // Reset buttons
+    document.getElementById('tab-btn-form').classList.remove('active');
+    document.getElementById('tab-btn-dashboard').classList.remove('active');
+    
+    // Reset sections
+    document.getElementById('tab-content-form').classList.remove('active');
+    document.getElementById('tab-content-dashboard').classList.remove('active');
+
+    // Activate selected
+    document.getElementById(`tab-btn-${tabName}`).classList.add('active');
+    document.getElementById(`tab-content-${tabName}`).classList.add('active');
+
+    if (tabName === 'dashboard') {
+      updateDashboardMetrics();
+    }
+  }
+
+  // --- 8. UTILITY METHOD COLLECTIONS ---
+
+  /**
+   * Create standard toast alerts.
+   */
+  function showToast(title, message, typeClass = 'toast-success', duration = 4000) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${typeClass}`;
+    
+    let icon = '🔔';
+    if (typeClass === 'toast-success') icon = '✅';
+    if (typeClass === 'toast-warning') icon = '⚠️';
+    if (typeClass === 'toast-danger') icon = '🚨';
+
+    toast.innerHTML = `
+      <span class="toast-icon">${icon}</span>
+      <div class="toast-content">
+        <div class="toast-title">${title}</div>
+        <div class="toast-msg">${message}</div>
+      </div>
+      <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
+    `;
+
+    container.appendChild(toast);
+
+    // Auto dismiss
+    setTimeout(() => {
+      toast.classList.add('closing');
+      setTimeout(() => {
+        toast.remove();
+      }, 300);
+    }, duration);
+  }
+
+  /**
+   * Escape HTML entities to secure output strings.
+   */
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str.toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+</script>
