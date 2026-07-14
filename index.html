@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Crew Inspection App</title>
+  <!-- Link modern font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Include CSS Stylesheet -->
+  <?!= include('style'); ?>
+</head>
+<body>
+
+  <!-- Loading Overlay -->
+  <div id="app-loader" class="loader-overlay">
+    <div class="spinner-container">
+      <div class="crew-spinner"></div>
+      <p class="loader-text">Loading Crew Inspection Portal...</p>
+    </div>
+  </div>
+
+  <!-- Toast Notification System -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Main Application Layout -->
+  <div id="app-layout" class="app-layout hidden">
+    
+    <!-- Top Navigation Bar -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="brand-sub">📋 Crew Audit Portal</div>
+      </div>
+      
+      <!-- Network & User Session Stats -->
+      <div class="header-actions">
+        <div id="network-badge" class="network-badge online">
+          <span class="badge-dot"></span>
+          <span class="badge-label">Online</span>
+        </div>
+        <div class="user-profile">
+          <div class="user-avatar" id="user-avatar-initials">OB</div>
+          <div class="user-info">
+            <span class="user-name" id="profile-name">Observer</span>
+            <span class="user-email" id="profile-email">email@airasia.com</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content Container -->
+    <main class="app-content">
+      
+      <!-- NAVIGATION TABS -->
+      <div class="nav-tabs">
+        <button id="tab-btn-form" class="tab-btn active" onclick="switchTab('form')">
+          📝 Audit Form
+        </button>
+        <button id="tab-btn-dashboard" class="tab-btn" onclick="switchTab('dashboard')">
+          📊 Dashboard & History
+          <span id="pending-count-badge" class="pending-badge hidden">0</span>
+        </button>
+      </div>
+
+      <!-- TAB 1: AUDIT FORM -->
+      <section id="tab-content-form" class="tab-pane active">
+        
+        <!-- Local Draft Auto-save Banner -->
+        <div id="draft-banner" class="draft-banner hidden">
+          <span>💡 Working on a saved local draft</span>
+          <button class="btn-clear-draft" onclick="clearDraftForm()">Reset Draft</button>
+        </div>
+
+        <form id="inspection-form" onsubmit="handleFormSubmit(event)">
+          
+          <!-- General Information Section -->
+          <div class="card card-section">
+            <h3 class="section-title">✈️ General Information</h3>
+            <div class="grid-layout">
+              <div class="form-group">
+                <label for="obs-date" class="form-label">Observation Date <span class="required">*</span></label>
+                <input type="date" id="obs-date" class="form-input" required>
+              </div>
+              <div class="form-group">
+                <label for="flight-no" class="form-label">Flight No. <span class="required">*</span></label>
+                <input type="text" id="flight-no" class="form-input" placeholder="e.g. 3101" required inputmode="numeric" pattern="[0-9]*" oninput="this.value = this.value.replace(/[^0-9]/g, '')" title="Please enter numbers only">
+              </div>
+              <div class="form-group">
+                <label for="destination" class="form-label">Destination <span class="required">*</span></label>
+                <input type="text" id="destination" class="form-input" placeholder="e.g. DMK" required maxlength="3" oninput="this.value = this.value.toUpperCase().replace(/[^A-Z]/g, '')" style="text-transform: uppercase;" title="Please enter a 3-letter airport IATA code only">
+              </div>
+              <div class="form-group">
+                <label for="observer-name" class="form-label">Observer Name</label>
+                <input type="text" id="observer-name" class="form-input" disabled value="Loading...">
+              </div>
+            </div>
+          </div>
+
+          <!-- Checklist Items Section -->
+          <div class="card card-section">
+            <div class="section-header-row">
+              <h3 class="section-title">✅ Inspection Checklist</h3>
+              <span class="checklist-progress-text" id="checklist-progress">Progress: 0% (0/20)</span>
+            </div>
+            
+            <!-- Quick Fill Shortcut for rapid entry -->
+            <div class="quick-fill-bar">
+              <span class="quick-fill-label">Quick Set All:</span>
+              <button type="button" class="btn btn-sm btn-outline-pass" onclick="bulkSetChecklist('Pass')">Set All Pass</button>
+              <button type="button" class="btn btn-sm btn-outline" onclick="bulkSetChecklist('N/A')">Set All N/A</button>
+            </div>
+
+            <!-- Checklist questions container -->
+            <div id="checklist-container" class="checklist-list">
+              <!-- Dynamically populated via JS -->
+              <div class="checklist-skeleton">
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Overall Comments Section -->
+          <div class="card card-section">
+            <h3 class="section-title">💬 Additional Remarks</h3>
+            <div class="form-group">
+              <label for="overall-comments" class="form-label">Overall Comments</label>
+              <textarea id="overall-comments" class="form-input textarea-input" rows="4" placeholder="Enter overall observations, positive notes, or feedback on crew performance..."></textarea>
+            </div>
+          </div>
+
+          <!-- Submission Controls -->
+          <div class="form-actions-container">
+            <button type="button" class="btn btn-secondary" onclick="confirmResetForm()">Reset Form</button>
+            <button type="submit" class="btn btn-primary btn-submit-audit" id="btn-submit">
+              🚀 Save Audit Report
+            </button>
+          </div>
+
+        </form>
+      </section>
+
+      <!-- TAB 2: DASHBOARD & SUMMARY -->
+      <section id="tab-content-dashboard" class="tab-pane">
+        
+        <!-- Metrics Stats Row -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon red-bg">✈️</div>
+            <div class="stat-info">
+              <div class="stat-value" id="stat-total-audits">0</div>
+              <div class="stat-label">Total Audits</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon green-bg">🏆</div>
+            <div class="stat-info">
+              <div class="stat-value" id="stat-pass-rate">0%</div>
+              <div class="stat-label">Checklist Pass Rate</div>
+            </div>
+          </div>
+          <div class="stat-card urgent-card" id="stat-pending-card">
+            <div class="stat-icon yellow-bg">📭</div>
+            <div class="stat-info">
+              <div class="stat-value" id="stat-pending-sync">0</div>
+              <div class="stat-label">Pending Sync (Offline)</div>
+            </div>
+            <button class="btn btn-sm btn-warning sync-pulse-btn hidden" id="dashboard-sync-btn" onclick="triggerManualSync()">
+              🔄 Sync Now
+            </button>
+          </div>
+        </div>
+
+        <!-- Sync Console Log Card -->
+        <div id="sync-console-card" class="card sync-console-card hidden">
+          <div class="console-header">
+            <h4>🔄 Data Synchronization Console</h4>
+            <span class="console-close" onclick="hideSyncConsole()">✕</span>
+          </div>
+          <div class="console-body" id="sync-console-log">
+            <div class="console-line">Initializing console...</div>
+          </div>
+        </div>
+
+        <!-- Audit History & Records Section -->
+        <div class="card history-card">
+          <div class="history-header">
+            <h3 class="section-title">📅 Audit Logs History</h3>
+            
+            <!-- Filters Panel -->
+            <div class="filters-container">
+              <input type="text" id="search-input" class="form-input search-input" placeholder="🔍 Search Flight No., Destination..." oninput="filterHistory()">
+              <select id="status-filter" class="form-input select-filter" onchange="filterHistory()">
+                <option value="all">All Records</option>
+                <option value="pending">Pending Sync Only</option>
+                <option value="synced">Synced Only</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- History Records List -->
+          <div id="history-container" class="history-list">
+            <!-- Dynamically populated via JS -->
+            <div class="empty-state">
+              <div class="empty-state-icon">📋</div>
+              <h4>No Audits Recorded Yet</h4>
+              <p>Completed audits will be displayed here. Go to 'Audit Form' to create your first report.</p>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+    <footer class="app-footer">
+      <p>Operations Quality Assurance • v1.2.0 • Offline-Ready</p>
+    </footer>
+
+  </div>
+
+  <!-- Include Frontend Logic (Javascript) -->
+  <?!= include('script'); ?>
+</body>
+</html>
